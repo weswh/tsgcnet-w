@@ -80,41 +80,7 @@ class STNkd(nn.Module):
         x = x.view(-1, self.k, self.k)
         return x
 
-class WeightedSumLocalFeatureAggregation(nn.Module):
-    def __init__(self, feature_dim, out_dim, k):
-        super(WeightedSumLocalFeatureAggregation, self).__init__()
-        self.k = k
 
-        # 特征转换层
-        self.feature_transform = nn.Sequential(
-            nn.Conv2d(feature_dim, out_dim, kernel_size=1, bias=False),
-            nn.BatchNorm2d(out_dim),
-            nn.ReLU()
-        )
-
-        # 权重生成层
-        self.weight_generation = nn.Sequential(
-            nn.Conv2d(feature_dim, 1, kernel_size=1, bias=False),
-            nn.Softmax(dim=-1)
-        )
-
-    def forward(self, x):
-        # x 的形状预期为 [B, F, N, K]
-        # 其中 F 是特征维度，N 是点数，K 是每个点的邻居数
-        # 确保输入数据的形状符合卷积层的预期
-
-        x = x.permute(0, 2, 3, 1)  # 转换 x 为 [B, N, K, F]
-
-        # 确保特征转换层的输入形状是 [B, F, K, N]
-        x = x.permute(0, 3, 2, 1)  # 转换 x 为 [B, F, K, N]
-
-        transformed_features = self.feature_transform(x)  # [B, O, K, N]
-        weights = self.weight_generation(x)  # [B, 1, K, N]
-
-        # 使用加权和聚合特征
-        aggregated_features = torch.sum(transformed_features * weights, dim=2)  # [B, O, N]
-
-        return aggregated_features.permute(0, 1, 2)  # 转换为 [B, N, O]
 
 
 def get_graph_feature(coor, nor, k=10):
@@ -151,47 +117,6 @@ def get_graph_feature(coor, nor, k=10):
     return coor_feature, nor_feature, index
 
 
-class ModifiedWeightedSumLocalFeatureAggregation(nn.Module):
-    def __init__(self, feature_dim, out_dim, K):
-        super(ModifiedWeightedSumLocalFeatureAggregation, self).__init__()
-        self.K = K
-
-        # 特征转换层
-        self.feature_transform = nn.Sequential(
-            nn.Conv2d(feature_dim * 2, out_dim, kernel_size=1, bias=False),
-            nn.BatchNorm2d(out_dim),
-            nn.LeakyReLU(negative_slope=0.2)
-        )
-
-        # 权重生成层
-        self.weight_generation = nn.Sequential(
-            nn.Conv2d(feature_dim * 2, 1, kernel_size=1, bias=False),
-            nn.Softmax(dim=-1)
-        )
-
-    def forward(self, Graph_index, x, feature):
-        B, C, N = x.shape
-        x = x.contiguous().view(B, N, C)
-        feature = feature.permute(0, 2, 3, 1)
-        neighbor_feature = index_points(x, Graph_index)
-        center = x.view(B, N, 1, C).expand(B, N, self.K, C)
-
-        # 组合中心点特征和邻居特征
-        delta_feature = torch.cat([center - neighbor_feature, neighbor_feature], dim=3).permute(0, 3, 2, 1)
-
-        # 特征转换
-        transformed_features = self.feature_transform(delta_feature)  # [B, O, N, K]
-
-        # 调整 feature 维度以匹配 transformed_features
-        feature = feature.permute(0, 3, 2, 1)  # 确保 feature 的形状是 [B, N, K, F]
-
-        # 权重生成
-        weights = self.weight_generation(delta_feature)  # [B, 1, N, K]
-
-        # 使用加权和聚合特征
-        aggregated_features = torch.sum(transformed_features * weights * feature, dim=-1)  # [B, O, N]
-
-        return aggregated_features.permute(0, 2, 1)  # [B, N, O]
 
 
 class GraphAttention(nn.Module):
@@ -262,67 +187,6 @@ class ECA(nn.Module):
         out = x * y.expand_as(x)
         return self.bn(out)
 
-class nECA(nn.Module):
-    def __init__(self, channel, gamma=1.5, b=1):
-        super(nECA, self).__init__()
-        self.gamma = gamma
-        self.b = b
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)  # 2D平均池化
-        self.conv = self.build_conv(channel)
-        self.bn = nn.BatchNorm2d(channel)  # 2D批处理规范化
-
-    def build_conv(self, channel):
-        k = self.calculate_kernel_size(channel)
-        padding = (k - 1) // 2
-        # 更改卷积层以接受 'channel' 输入通道并输出 'channel' 通道。
-        return nn.Conv2d(channel, channel, kernel_size=(k, k), padding=(padding, padding), groups=channel, bias=False)
-
-    def calculate_kernel_size(self, channel):
-        k = math.ceil(math.log2(channel) / self.gamma + self.b / self.gamma)
-        k = k if k % 2 == 1 else k + 1
-        return k
-
-    def forward(self, x):
-        b, c, _, _ = x.size()  # 修改这里以处理4D张量
-        y = self.avg_pool(x).view(b, c, 1, 1)  # 修改视图以匹配2D数据的维度
-        y = self.conv(y)
-        y = torch.sigmoid(y)
-        out = x * y.expand_as(x)  # 应用注意力机制
-        return self.bn(out)  # 应用批处理规范化
-
-
-
-# class ECA(nn.Module):
-#     def __init__(self, channel, gamma=2.0, b=1.0, use_dropout=False, dropout_prob=0.0):
-#         super(ECA, self).__init__()
-#         self.gamma = nn.Parameter(torch.tensor(gamma))
-#         self.b = nn.Parameter(torch.tensor(b))
-#         self.avg_pool = nn.AdaptiveAvgPool1d(1)
-#         self.conv = self.build_conv(channel)
-#         self.bn = nn.BatchNorm1d(channel)
-#         self.use_dropout = use_dropout
-#         if use_dropout:
-#             self.dropout = nn.Dropout(dropout_prob)
-#
-#     def build_conv(self, channel):
-#         k = self.calculate_kernel_size(channel)
-#         padding = (k - 1) // 2
-#         return nn.Conv1d(1, 1, kernel_size=k, padding=padding, bias=False)
-#
-#     def calculate_kernel_size(self, channel):
-#         k = math.ceil(math.log2(channel) / self.gamma.item() + self.b.item() / self.gamma.item())
-#         k = k if k % 2 == 1 else k + 1
-#         return int(k)
-#
-#     def forward(self, x):
-#         b, c, l = x.size()
-#         y = self.avg_pool(x.view(b, c, l)).view(b, 1, c)
-#         y = self.conv(y)
-#         y = torch.sigmoid(y).view(b, c, 1)
-#         out = x * y.expand_as(x)
-#         if self.use_dropout:
-#             out = self.dropout(out)
-#         return self.bn(out)
 
 
 class SelfAttention(nn.Module):
@@ -403,17 +267,6 @@ class TSGCNet(nn.Module):
         self.bn2_c = nn.BatchNorm2d(out2)
         self.bn3_c = nn.BatchNorm2d(out3)
         self.bn4_c = nn.BatchNorm1d(out4)
-        # self.conv1_c = nn.Sequential(nn.Conv2d(in_channels*2, out1, kernel_size=1, bias=False),
-        #                            self.bn1_c,
-        #                            nn.LeakyReLU(negative_slope=0.2))
-        #
-        # self.conv2_c = nn.Sequential(nn.Conv2d(out1*2, out2, kernel_size=1, bias=False),
-        #                            self.bn2_c,
-        #                            nn.LeakyReLU(negative_slope=0.2))
-        #
-        # self.conv3_c = nn.Sequential(nn.Conv2d(out2*2, out3, kernel_size=1, bias=False),
-        #                            self.bn3_c,
-        #                            nn.LeakyReLU(negative_slope=0.2))
 
         self.conv1_c = ResidualBlock2(in_channels*2, out1)
 
@@ -437,14 +290,6 @@ class TSGCNet(nn.Module):
         self.channel_attention_layer2 = ChannelAttention(out2)
         self.channel_attention_layer3 = ChannelAttention(out3)
         self.channel_attention_layer4 = ChannelAttention(out4*2)
-
-        self.nECA1 = nECA(out1)
-        self.nECA2 = nECA(out2)
-        self.nECA3 = nECA(out3)
-
-        # self.nECA1 = nECA(channel=64, gamma=2, b=1)
-        # self.nECA2 = nECA(channel=128, gamma=1.5, b=1)
-        # self.nECA3 = nECA(channel=256, gamma=1, b=1)
 
         self.eca1 = ECA(512)
         self.eca2 = ECA(256)
@@ -481,16 +326,6 @@ class TSGCNet(nn.Module):
                                 nn.LeakyReLU(0.2))
 
         ''' feature fusion '''
-        # self.pred1 = nn.Sequential(nn.Conv1d(out4*2, 512, kernel_size=1, bias=False),
-        #                            nn.BatchNorm1d(512),
-        #                            nn.LeakyReLU(negative_slope=0.2))
-        # self.pred2 = nn.Sequential(nn.Conv1d(512, 256, kernel_size=1, bias=False),
-        #                            nn.BatchNorm1d(256),
-        #                            nn.LeakyReLU(negative_slope=0.2))
-        # self.pred3 = nn.Sequential(nn.Conv1d(256, 128, kernel_size=1, bias=False),
-        #                            nn.BatchNorm1d(128),
-        #                            nn.LeakyReLU(negative_slope=0.2))
-        # self.pred4 = nn.Sequential(nn.Conv1d(128, output_channels, kernel_size=1, bias=False))
         #
         self.pred1 = ResidualBlock(out4 * 2, 512)
         self.pred2 = ResidualBlock(512, 256)
@@ -526,7 +361,6 @@ class TSGCNet(nn.Module):
         coor1 = self.attention_layer1_c(index, coor, coor1)
 
         coor1 = self.channel_attention_layer1(coor1)
-        # nor1 = self.nECA1(nor1)
         nor1 = nor1.max(dim=-1, keepdim=False)[0]
 
         del coor, nor
@@ -537,7 +371,6 @@ class TSGCNet(nn.Module):
         nor2 = self.conv2_n(nor2)
         coor2 = self.attention_layer2_c(index, coor1, coor2)
         coor2 = self.channel_attention_layer2(coor2)
-        # nor2 = self.nECA2(nor2)
 
         nor2 = nor2.max(dim=-1, keepdim=False)[0]
 
@@ -546,7 +379,6 @@ class TSGCNet(nn.Module):
         nor3 = self.conv3_n(nor3)
         coor3 = self.attention_layer3_c(index, coor2, coor3)
         coor3 = self.channel_attention_layer3(coor3)
-        # nor3 = self.nECA3(nor3)
         nor3 = nor3.max(dim=-1, keepdim=False)[0]
 
         coor = torch.cat((coor1, coor2, coor3), dim=1)
