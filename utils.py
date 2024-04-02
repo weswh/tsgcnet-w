@@ -103,3 +103,50 @@ def test_semseg(model, loader, num_classes=8, gpu=True, generate_ply=False):
     mIoU = np.mean(cat_iou)
 
     return metrics, mIoU, cat_iou
+
+
+# This function calculates Dice Similarity Coefficient (DSC), Sensitivity (SEN), and Positive Predictive Value (PPV) for each class
+
+def calculate_metrics(pred, target, num_classes):
+    metrics = {'DSC': [], 'SEN': [], 'PPV': []}
+    for class_idx in range(num_classes):
+        TP = np.sum((target == class_idx) & (pred == class_idx))
+        FP = np.sum((pred == class_idx) & (target != class_idx))
+        FN = np.sum((target == class_idx) & (pred != class_idx))
+
+        DSC = (2 * TP) / (2 * TP + FP + FN) if (2 * TP + FP + FN) != 0 else 0
+        SEN = TP / (TP + FN) if (TP + FN) != 0 else 0
+        PPV = TP / (TP + FP) if (TP + FP) != 0 else 0
+
+        metrics['DSC'].append(DSC)
+        metrics['SEN'].append(SEN)
+        metrics['PPV'].append(PPV)
+
+    return metrics
+
+# Updates the test_semseg function to calculate and return the new metrics along with existing ones
+
+def test_semseg(model, loader, num_classes=8, gpu=True, generate_ply=False):
+    # ... [existing code] ...
+    # Add the following at the beginning of the test_semseg function
+    global_metrics = {'DSC': [], 'SEN': [], 'PPV': []}
+
+    # ... [rest of your existing code] ...
+
+    # Inside the loop after you have computed pred and target
+    # Replace 'pred_np' and 'target_np' with your actual predictions and targets
+    pred_np = pred.cpu().data.numpy()
+    target_np = target.cpu().data.numpy()
+    batch_metrics = calculate_metrics(pred_np, target_np, num_classes)
+    
+    for metric in global_metrics.keys():
+        global_metrics[metric].extend(batch_metrics[metric])
+
+    # ... [rest of your existing code] ...
+
+    # After the loop, to calculate the average metrics for the entire dataset
+    for metric in global_metrics.keys():
+        global_metrics[metric] = np.mean(global_metrics[metric])
+
+    return global_metrics
+
